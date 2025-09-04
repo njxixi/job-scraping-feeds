@@ -1,99 +1,142 @@
 import re
 from datetime import datetime, timedelta, timezone
-from dateutil import parser as dtp
-from adapters.utils import http_ok_and_has_apply, canonicalize_url, COLUMNS
 
-# US location heuristics (inclusive of onsite/hybrid/remote as long as US-based)
-US_STATES = {
-    "AL","AK","AZ","AR","CA","CO","CT","DE","FL","GA","HI","ID","IL","IN","IA","KS",
-    "KY","LA","ME","MD","MA","MI","MN","MS","MO","MT","NE","NV","NH","NJ","NM","NY",
-    "NC","ND","OH","OK","OR","PA","RI","SC","SD","TN","TX","UT","VT","VA","WA","WV","WI","WY"
+# -----------------------------
+# CONFIG
+# -----------------------------
+MAX_EXPERIENCE_YEARS = 2
+POSTING_WINDOW_HOURS = 24
+
+# Regex for visa restrictions
+BLOCKLIST_PATTERNS = [
+    r"no\s+sponsorship",
+    r"cannot\s+sponsor",
+    r"without\s+visa",
+    r"green\s*card\s+only",
+    r"citizens\s+only",
+    r"us\s+citizenship\s+required",
+    r"security\s+clearance",
+]
+
+# Industries / companies to exclude (defense contractors etc.)
+BLOCKLIST_INDUSTRY = [
+    "boeing",
+    "raytheon",
+    "lockheed",
+    "northrop",
+    "general dynamics",
+    "bae systems",
+    "huntington ingalls",
+]
+
+# Regex for role categories
+ROLE_KEYWORDS = {
+    "Intern": [r"\bintern(ship)?\b"],
+    "New Grad": [r"new\s*grad", r"university\s+graduate", r"\brecent\s+graduate\b"],
+    "Entry-Level": [r"entry[-\s]*level", r"analyst\s*i\b"],  # Analyst I as entry-level
+    "Junior": [r"\bjunior\b"],
+    "Co-op": [r"\bco[- ]?op\b"],
 }
-US_PAT = re.compile(r"(united states|usa|\bUS\b|,\s*USA|,\s*United States)", re.I)
 
-VISANEG_PAT = re.compile(
-    r"(no sponsorship|unable to sponsor|cannot sponsor|citizens only|u\.s\. citizens only|us citizens only|green\s*card\s*only|gc\s*only|security\s*clearance|active\s*clearance)",
-    re.I
-)
-EXP_OK_PAT  = re.compile(r"(intern|new\s*grad|entry[-\s]*level|junior|jr\.|0[-–]\s*2\s*years|\b1\s*year\b|\b2\s*years\b)", re.I)
-EXP_BAD_PAT = re.compile(r"(\b3\+\s*years|\b4\+\s*years|\b5\+\s*years|\b[3-9]\s*years\b)", re.I)
+# -----------------------------
+# HELPERS
+# -----------------------------
+
+def is_recent(posted_iso: str) -> bool:
+    """Check if job was posted in the last 24 hours"""
+    if not posted_iso:
+        return False
+    try:
+        dt = datetime.fromisoformat(posted_iso.replace("Z", "+00:00"))
+        return dt >= datetime.now(timezone.utc) - timedelta(hours=POSTING_WINDOW_HOURS)
+    except Exception:
+        return False
 
 def is_us_location(loc: str) -> bool:
-    if not loc: return False
-    t = loc.strip()
-    if US_PAT.search(t): return True
-    # City, ST
-    parts = [p.strip() for p in t.split(",")]
-    if len(parts) >= 2 and parts[-1].upper() in US_STATES: return True
-    # Remote US hints
-    if re.search(r"(remote).*(us|united states|usa)", t, re.I): return True
-    return False
+    """Keep only US-based roles (onsite, hybrid, or remote-US)."""
+    if not loc:
+        return False
+    loc_lower = loc.lower()
+    return any([
+        "united states" in loc_lower,
+        "us" in loc_lower,
+        "usa" in loc_lower,
+        "remote - north america" in loc_lower,
+        re.search(r"\b[A-Z]{2}\b", loc),  # state abbreviations like NY, CA
+    ])
 
-def within_24h(iso_str_or_text: str) -> bool:
-    if not iso_str_or_text: return False
-    now = datetime.now(timezone.utc)
-    try:
-        dt = dtp.parse(iso_str_or_text)
-        if not dt.tzinfo: dt = dt.replace(tzinfo=timezone.utc)
-        return (now - dt) <= timedelta(hours=24)
-    except Exception:
-        t = iso_str_or_text.lower()
-        return any(s in t for s in ["today", "24 hour", "1 day"])
+def passes_visa_filter(text: str) -> bool:
+    """Reject if text explicitly blocks sponsorship"""
+    if not text:
+        return True
+    for pat in BLOCKLIST_PATTERNS:
+        if re.search(pat, text, re.IGNORECASE):
+            return False
+    return True
 
-def normalize_role_category(title: str, desc: str) -> str:
-    t = f"{title or ''} {desc or ''}".lower()
-    if "intern" in t: return "Intern"
-    if "new grad" in t or "university grad" in t or "college grad" in t: return "New Grad"
-    if "entry" in t or "entry-level" in t or "junior" in t or "jr." in t: return "Entry-Level"
-    if "co-op" in t or "co op" in t: return "Co-op"
-    return "Entry-Level"
+def passes_industry_filter(company: str) -> bool:
+    """Reject jobs from blocked industries (e.g., defense contractors)."""
+    if not company:
+        return True
+    company_lower = company.lower()
+    return not any(blocked in company_lower for blocked in BLOCKLIST_INDUSTRY)
 
-def filter_and_normalize(jobs, company: str, tier: str):
+def infer_role_category(title: str, description: str) -> str:
+    """Infer role category (Intern, New Grad, Entry-Level, Junior, Co-op)"""
+    text = f"{title} {description}".lower()
+    for cat, patterns in ROLE_KEYWORDS.items():
+        for pat in patterns:
+            if re.search(pat, text):
+                return cat
+    return "Entry-Level"  # default fallback
+
+def requires_low_experience(text: str) -> bool:
+    """Check if description requires ≤ 2 years experience"""
+    if not text:
+        return True
+    matches = re.findall(r"(\d+)\s*\+?\s*years?", text.lower())
+    if matches:
+        min_years = min(int(y) for y in matches)
+        return min_years <= MAX_EXPERIENCE_YEARS
+    return True  # assume OK if not specified
+
+# -----------------------------
+# MAIN FILTER PIPELINE
+# -----------------------------
+
+def filter_job(job: dict) -> dict or None:
     """
-    Input jobs are minimally structured dicts with fields:
-    id, title, location, url/apply_link, posted_iso or posted_text, work_model (optional), description (optional)
+    Apply all filters to a single job dict.
+    Expected job keys:
+      id, title, location, apply_link, posted_iso, description, work_model, company
     """
-    kept = []
-    for j in jobs:
-        title = j.get("title","")
-        location = j.get("location","")
-        desc = j.get("description","") or ""
-        posted = j.get("posted_iso") or j.get("posted_text") or j.get("posted","")
-        apply_url = j.get("apply_link") or j.get("url")
+    title = job.get("title", "")
+    desc = job.get("description", "")
+    loc = job.get("location", "")
+    posted = job.get("posted_iso", "")
+    company = job.get("Company", "")
 
-        # Location
-        if not is_us_location(location): 
-            continue
-        # Experience window
-        text_for_exp = f"{title}\n{desc}"
-        if not EXP_OK_PAT.search(text_for_exp) or EXP_BAD_PAT.search(text_for_exp):
-            continue
-        # Visa / clearance screen
-        if VISANEG_PAT.search(desc):
-            continue
-        # Freshness
-        if not within_24h(posted):
-            continue
+    # 1. US only
+    if not is_us_location(loc):
+        return None
 
-        # Validate apply link (prefer ATS link if available)
-        direct_link = canonicalize_url(apply_url) if apply_url else ""
-        notes = ""
-        if direct_link and not http_ok_and_has_apply(direct_link):
-            notes = f"fallback-url {direct_link} (apply not detected)"
-            direct_link = ""  # per your rule
+    # 2. Freshness
+    if not is_recent(posted):
+        return None
 
-        role_category = normalize_role_category(title, desc)
+    # 3. Visa filters
+    if not passes_visa_filter(f"{title} {desc}"):
+        return None
 
-        kept.append({
-            "Tier": tier,
-            "Company": company,
-            "Role Category": role_category,
-            "Job Title": title.strip(),
-            "Location": location.strip(),
-            "Job ID/Req ID": (j.get("id") or "").strip(),
-            "Direct Apply Link": direct_link,
-            "Posted/Updated Timestamp (ISO)": j.get("posted_iso") or "",
-            "Work Model": j.get("work_model",""),
-            "Notes": notes
-        })
-    return kept
+    # 4. Experience
+    if not requires_low_experience(desc):
+        return None
+
+    # 5. Industry filter
+    if not passes_industry_filter(company):
+        return None
+
+    # 6. Enrich with inferred role category
+    job["role_category"] = infer_role_category(title, desc)
+
+    return job
