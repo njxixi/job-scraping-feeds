@@ -1,49 +1,70 @@
-import pandas as pd
-from datetime import datetime, timezone
 import os
+import csv
+import json
+from datetime import datetime
+from adapters import amazon, workday, greenhouse, lever, successfactors
+from filters import apply_filters
 
-# Output files
-TIER1_FILE = "tier1.csv"
-TIER2_FILE = "tier2.csv"
+DATA_DIR = "data"
 
-# Output columns
-COLUMNS = [
-    "Tier", "Company", "Role Category", "Job Title", "Location",
-    "Job ID/Req ID", "Direct Apply Link", "Posted/Updated (ISO)",
-    "Work Model", "Notes"
-]
+def write_to_csv(filename, rows):
+    filepath = os.path.join(DATA_DIR, filename)
+    file_exists = os.path.isfile(filepath)
 
-def append_dummy():
-    now_iso = datetime.now(timezone.utc).isoformat()
+    with open(filepath, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        if not file_exists:
+            writer.writerow([
+                "Tier", "Company", "Role Category", "Job Title", "Location",
+                "Job ID/Req ID", "Direct Apply Link", 
+                "Posted/Updated Timestamp (ISO)", "Work Model", "Notes"
+            ])
+        for row in rows:
+            writer.writerow(row)
 
-    # New dummy rows
-    tier1_dummy = [[
-        1, "Amazon", "Intern", f"Dummy SWE Intern {now_iso}", "Seattle, WA",
-        f"TEST{int(datetime.now().timestamp())}", "https://www.amazon.jobs/en/jobs/TEST123",
-        now_iso, "Hybrid", "Dummy entry for pipeline test"
-    ]]
+def scrape_companies(config_file, tier_label, output_csv):
+    with open(os.path.join(DATA_DIR, config_file), "r", encoding="utf-8") as f:
+        companies = json.load(f)
 
-    tier2_dummy = [[
-        2, "TestCorp", "Entry-Level", f"Dummy Data Analyst {now_iso}", "New York, NY",
-        f"TEST{int(datetime.now().timestamp())}", "https://testcorp.com/jobs/TEST456",
-        now_iso, "Remote", "Dummy entry for pipeline test"
-    ]]
+    all_rows = []
+    for company in companies:
+        scraper = {
+            "workday": workday,
+            "greenhouse": greenhouse,
+            "lever": lever,
+            "successfactors": successfactors,
+            "amazon": amazon
+        }.get(company["ats"])
 
-    # Append or create Tier 1
-    if os.path.exists(TIER1_FILE):
-        existing = pd.read_csv(TIER1_FILE)
-        updated = pd.concat([existing, pd.DataFrame(tier1_dummy, columns=COLUMNS)], ignore_index=True)
-    else:
-        updated = pd.DataFrame(tier1_dummy, columns=COLUMNS)
-    updated.to_csv(TIER1_FILE, index=False)
+        if not scraper:
+            continue
 
-    # Append or create Tier 2
-    if os.path.exists(TIER2_FILE):
-        existing = pd.read_csv(TIER2_FILE)
-        updated = pd.concat([existing, pd.DataFrame(tier2_dummy, columns=COLUMNS)], ignore_index=True)
-    else:
-        updated = pd.DataFrame(tier2_dummy, columns=COLUMNS)
-    updated.to_csv(TIER2_FILE, index=False)
+        jobs = scraper.scrape(company["url"])
+        jobs = apply_filters(jobs)
+
+        for job in jobs:
+            all_rows.append([
+                tier_label,
+                company["company"],
+                job.get("role_category", ""),
+                job.get("title", ""),
+                job.get("location", ""),
+                job.get("id", ""),
+                job.get("apply_link", ""),
+                job.get("posted", ""),
+                job.get("work_model", ""),
+                job.get("notes", "")
+            ])
+
+    if all_rows:
+        write_to_csv(output_csv, all_rows)
 
 if __name__ == "__main__":
-    append_dummy()
+    scrape_companies("tier1.json", "1", "tier1.csv")
+    scrape_companies("fortune500.json", "2", "tier2.csv")
+
+    # Log run history
+    run_log = os.path.join(DATA_DIR, "run_history.csv")
+    with open(run_log, "a", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([datetime.utcnow().isoformat(), "Run completed"])
