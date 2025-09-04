@@ -6,7 +6,7 @@ on:
   workflow_dispatch:       # allow manual run from GitHub UI
 
 permissions:
-  contents: write   # allow pushing commits
+  contents: write   # allow pushing commits back to the repo
 
 jobs:
   scrape:
@@ -39,3 +39,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
+            git commit -m "auto: update job sweep"
+            git push origin master
+          fi
