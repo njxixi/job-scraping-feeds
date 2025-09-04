@@ -1,142 +1,148 @@
-import re
-from datetime import datetime, timedelta, timezone
+import json
+import os
+import csv
+import hashlib
+from datetime import datetime, timezone
+from importlib import import_module
+from filters import filter_job
 
-# -----------------------------
-# CONFIG
-# -----------------------------
-MAX_EXPERIENCE_YEARS = 2
-POSTING_WINDOW_HOURS = 24
-
-# Regex for visa restrictions
-BLOCKLIST_PATTERNS = [
-    r"no\s+sponsorship",
-    r"cannot\s+sponsor",
-    r"without\s+visa",
-    r"green\s*card\s+only",
-    r"citizens\s+only",
-    r"us\s+citizenship\s+required",
-    r"security\s+clearance",
-]
-
-# Regex for *senior-level exclusions*
-EXCLUDE_TITLE_PATTERNS = [
-    r"\bstaff\b",
-    r"\bsenior\b",
-    r"\bprincipal\b",
-    r"\b(principal|principle)\s+engineer\b",
-    r"\bmember\s+of\s+technical\s+staff\b",
-    r"\bMTS\b",   # short form for Member of Technical Staff
-]
-
-# Regex for role categories
-ROLE_KEYWORDS = {
-    "Intern": [r"\bintern(ship)?\b"],
-    "New Grad": [r"new\s*grad", r"university\s+graduate"],
-    "Entry-Level": [r"entry[-\s]*level"],
-    "Junior": [r"\bjunior\b"],
-    "Co-op": [r"\bco[- ]?op\b"],
-}
+DATA_DIR = "data"
 
 # -----------------------------
 # HELPERS
 # -----------------------------
 
-def is_recent(posted_iso: str) -> bool:
-    """Check if job was posted in the last 24 hours"""
-    if not posted_iso:
-        return False
+def load_json(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def stable_job_id(job):
+    """
+    Generate a stable ID for a job.
+    Prefer ATS-provided ID. If missing, fallback to hash of title+location+apply_link.
+    """
+    jid = job.get("id")
+    if jid and jid.strip():
+        return jid.strip()
+    key = f"{job.get('title','')}|{job.get('location','')}|{job.get('apply_link','')}"
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()[:12]  # shorter hash
+
+def append_to_csv(path, rows, headers):
+    """Hybrid mode: append new rows, or rebuild if file is empty."""
+    seen_ids = set()
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                seen_ids.add(row["Job ID/Req ID"])
+
+    new_rows = [r for r in rows if r["Job ID/Req ID"] not in seen_ids]
+
+    write_header = not os.path.exists(path) or os.path.getsize(path) == 0
+    if not new_rows and not write_header:
+        return 0
+
+    with open(path, "a", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        if write_header:
+            writer.writeheader()
+        writer.writerows(new_rows)
+
+    return len(new_rows)
+
+def update_first_seen(path, companies):
+    seen = set()
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
+            seen = {line.strip().split(",")[0] for line in f if line.strip()}
+
+    with open(path, "a", encoding="utf-8") as f:
+        for comp in companies:
+            if comp not in seen:
+                f.write(f"{comp},{datetime.now(timezone.utc).date()}\n")
+
+def update_run_history(path, tier, count):
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(f"{datetime.now(timezone.utc).date()},{tier},{count}\n")
+
+def update_stats(path, tier, scraped, accepted):
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(f"{datetime.now(timezone.utc).date()},{tier},{scraped},{accepted}\n")
+
+def get_scraper(ats):
     try:
-        dt = datetime.fromisoformat(posted_iso.replace("Z", "+00:00"))
-        return dt >= datetime.now(timezone.utc) - timedelta(hours=POSTING_WINDOW_HOURS)
-    except Exception:
-        return False
-
-def is_us_location(loc: str) -> bool:
-    """Keep only US-based roles (onsite, hybrid, or remote-US)"""
-    if not loc:
-        return False
-    loc_lower = loc.lower()
-    return any([
-        "united states" in loc_lower,
-        "u.s." in loc_lower,
-        "us" in loc_lower,
-        "usa" in loc_lower,
-        re.search(r"\b[A-Z]{2}\b", loc)  # state abbreviations like NY, CA
-    ])
-
-def passes_visa_filter(text: str) -> bool:
-    """Reject if text explicitly blocks sponsorship"""
-    if not text:
-        return True
-    for pat in BLOCKLIST_PATTERNS:
-        if re.search(pat, text, re.IGNORECASE):
-            return False
-    return True
-
-def exclude_senior_roles(text: str) -> bool:
-    """Reject jobs that are senior/staff/principal/etc."""
-    if not text:
-        return True
-    for pat in EXCLUDE_TITLE_PATTERNS:
-        if re.search(pat, text, re.IGNORECASE):
-            return False
-    return True
-
-def infer_role_category(title: str, description: str) -> str:
-    """Infer role category (Intern, New Grad, Entry-Level, Junior, Co-op)"""
-    text = f"{title} {description}".lower()
-    for cat, patterns in ROLE_KEYWORDS.items():
-        for pat in patterns:
-            if re.search(pat, text):
-                return cat
-    return "Entry-Level"  # default fallback
-
-def requires_low_experience(text: str) -> bool:
-    """Check if description requires ≤ 2 years experience"""
-    if not text:
-        return True
-    matches = re.findall(r"(\d+)\s*\+?\s*years?", text.lower())
-    if matches:
-        min_years = min(int(y) for y in matches)
-        return min_years <= MAX_EXPERIENCE_YEARS
-    return True
+        return import_module(f"adapters.{ats}")
+    except ModuleNotFoundError:
+        return None
 
 # -----------------------------
-# MAIN FILTER PIPELINE
+# MAIN SCRAPER
 # -----------------------------
 
-def filter_job(job: dict) -> dict or None:
-    """
-    Apply all filters to a single job dict.
-    Expected job keys:
-      id, title, location, apply_link, posted_iso, description, work_model
-    """
-    title = job.get("title", "")
-    desc = job.get("description", "")
-    loc = job.get("location", "")
-    posted = job.get("posted_iso", "")
+def run_for_tier(tier_name, json_file, csv_file):
+    companies = load_json(os.path.join(DATA_DIR, json_file))
+    all_jobs = []
+    scraped_count = 0
+    accepted_count = 0
 
-    # 1. US only
-    if not is_us_location(loc):
-        return None
+    for rec in companies:
+        scraper = get_scraper(rec["ats"])
+        if not scraper:
+            print(f"[WARN] No scraper for {rec['company']} (ATS={rec['ats']})")
+            continue
 
-    # 2. Freshness
-    if not is_recent(posted):
-        return None
+        try:
+            jobs = scraper.scrape(rec)
+        except Exception as e:
+            print(f"[ERROR] Failed {rec['company']}: {e}")
+            continue
 
-    # 3. Visa filters
-    if not passes_visa_filter(f"{title} {desc}"):
-        return None
+        scraped_count += len(jobs)
 
-    # 4. Senior/staff exclusion
-    if not exclude_senior_roles(title):
-        return None
+        for job in jobs:
+            job["Tier"] = tier_name
+            job["Company"] = rec["company"]
+            job["id"] = stable_job_id(job)
 
-    # 5. Experience
-    if not requires_low_experience(desc):
-        return None
+            filtered = filter_job(job)
+            if filtered:
+                accepted_count += 1
+                all_jobs.append({
+                    "Tier": filtered["Tier"],
+                    "Company": filtered["Company"],
+                    "Role Category": filtered["role_category"],
+                    "Job Title": filtered.get("title", ""),
+                    "Location": filtered.get("location", ""),
+                    "Job ID/Req ID": filtered["id"],
+                    "Direct Apply Link": filtered.get("apply_link", ""),
+                    "Posted/Updated Timestamp (ISO)": filtered.get("posted_iso", ""),
+                    "Work Model": filtered.get("work_model", ""),
+                    "Notes": filtered.get("notes", ""),
+                })
 
-    # 6. Enrich with inferred role category
-    job["role_category"] = infer_role_category(title, desc)
+    headers = [
+        "Tier",
+        "Company",
+        "Role Category",
+        "Job Title",
+        "Location",
+        "Job ID/Req ID",
+        "Direct Apply Link",
+        "Posted/Updated Timestamp (ISO)",
+        "Work Model",
+        "Notes"
+    ]
 
-    return job
+    count = append_to_csv(os.path.join(DATA_DIR, csv_file), all_jobs, headers)
+    update_first_seen(os.path.join(DATA_DIR, "first_seen.csv"), [rec["company"] for rec in companies])
+    update_run_history(os.path.join(DATA_DIR, "run_history.csv"), tier_name, count)
+    update_stats(os.path.join(DATA_DIR, "stats.csv"), tier_name, scraped_count, accepted_count)
+
+    print(f"[INFO] {tier_name}: {scraped_count} scraped, {accepted_count} passed filters, {count} new jobs added.")
+
+def main():
+    run_for_tier("Tier 1", "tier1.json", "tier1.csv")
+    run_for_tier("Tier 2", "fortune500.json", "tier2.csv")
+
+if __name__ == "__main__":
+    main()
