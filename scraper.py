@@ -3,11 +3,9 @@ import os
 import csv
 from datetime import datetime, timezone
 from importlib import import_module
-import pytz
 from filters import filter_job
 
 DATA_DIR = "data"
-LOCAL_TZ = pytz.timezone("America/Los_Angeles")
 
 # -----------------------------
 # HELPERS
@@ -49,18 +47,24 @@ def update_first_seen(path, companies):
     with open(path, "a", encoding="utf-8") as f:
         for comp in companies:
             if comp not in seen:
-                f.write(f"{comp},{datetime.now(timezone.utc).isoformat()}\n")
+                f.write(f"{comp},{datetime.now(timezone.utc).date().isoformat()}\n")
 
 def update_run_history(path, tier, count):
     with open(path, "a", encoding="utf-8") as f:
-        f.write(f"{datetime.now(timezone.utc).isoformat()},{tier},{count}\n")
+        f.write(f"{datetime.now(timezone.utc).date().isoformat()},{tier},{count}\n")
 
 def update_stats(path, tier, scraped, accepted, added):
-    """Write daily stats row (local time) for each tier."""
-    today = datetime.now(LOCAL_TZ).date().isoformat()
-    rows = []
+    """Write daily stats row for each tier, ensuring headers exist (date only)."""
+    from datetime import datetime
+    import pytz
 
-    # Keep all rows except today+tier (overwrite if exists)
+    LOCAL_TZ = pytz.timezone("America/Los_Angeles")
+    today = datetime.now(LOCAL_TZ).date().isoformat()
+
+    rows = []
+    headers = ["Date", "Tier", "Scraped", "Accepted", "Added"]
+
+    # Load existing rows (except today's row for this tier, which we'll replace)
     if os.path.exists(path):
         with open(path, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
@@ -68,7 +72,7 @@ def update_stats(path, tier, scraped, accepted, added):
                 if not (row["Date"] == today and row["Tier"] == tier):
                     rows.append(row)
 
-    # Insert today’s row
+    # Add/replace today's row
     rows.append({
         "Date": today,
         "Tier": tier,
@@ -77,7 +81,7 @@ def update_stats(path, tier, scraped, accepted, added):
         "Added": added,
     })
 
-    headers = ["Date", "Tier", "Scraped", "Accepted", "Added"]
+    # Always rewrite the file with headers
     with open(path, "w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=headers)
         writer.writeheader()
@@ -96,9 +100,7 @@ def get_scraper(ats):
 def run_for_tier(tier_name, json_file, csv_file):
     companies = load_json(os.path.join(DATA_DIR, json_file))
     all_jobs = []
-
-    scraped_count = 0
-    accepted_count = 0
+    scraped_total = 0
 
     for rec in companies:
         scraper = get_scraper(rec["ats"])
@@ -108,11 +110,10 @@ def run_for_tier(tier_name, json_file, csv_file):
 
         try:
             jobs = scraper.scrape(rec)
+            scraped_total += len(jobs)
         except Exception as e:
             print(f"[ERROR] Failed {rec['company']}: {e}")
             continue
-
-        scraped_count += len(jobs)
 
         for job in jobs:
             job["Tier"] = tier_name
@@ -120,7 +121,6 @@ def run_for_tier(tier_name, json_file, csv_file):
 
             filtered = filter_job(job)
             if filtered:
-                accepted_count += 1
                 all_jobs.append({
                     "Tier": filtered["Tier"],
                     "Company": filtered["Company"],
@@ -147,12 +147,20 @@ def run_for_tier(tier_name, json_file, csv_file):
         "Notes"
     ]
 
-    added_count = append_to_csv(os.path.join(DATA_DIR, csv_file), all_jobs, headers)
-    update_first_seen(os.path.join(DATA_DIR, "first_seen.csv"), [rec["company"] for rec in companies])
-    update_run_history(os.path.join(DATA_DIR, "run_history.csv"), tier_name, added_count)
-    update_stats(os.path.join(DATA_DIR, "stats.csv"), tier_name, scraped_count, accepted_count, added_count)
+    count = append_to_csv(os.path.join(DATA_DIR, csv_file), all_jobs, headers)
 
-    print(f"[INFO] {tier_name}: Scraped={scraped_count}, Accepted={accepted_count}, Added={added_count}")
+    # Stats breakdown
+    scraped = scraped_total
+    accepted = len(all_jobs)
+    added = count
+
+    # Update logs
+    update_first_seen(os.path.join(DATA_DIR, "first_seen.csv"), [rec["company"] for rec in companies])
+    update_run_history(os.path.join(DATA_DIR, "run_history.csv"), tier_name, count)
+    update_stats(os.path.join(DATA_DIR, "stats.csv"), tier_name, scraped, accepted, added)
+
+    print(f"[INFO] {tier_name} — Scraped: {scraped} | Accepted: {accepted} | Added: {added}")
+
 
 def main():
     run_for_tier("Tier 1", "tier1.json", "tier1.csv")
