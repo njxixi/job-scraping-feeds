@@ -1,1 +1,26 @@
-
+[
+  {"company": "Amazon", "tier": 1, "ats": "amazon_custom", "url": "https://www.amazon.jobs/en/"},
+  {"company": "Tesla", "tier": 1, "ats": "avature", "url": "https://www.tesla.com/careers"},
+  {"company": "Microsoft", "tier": 1, "ats": "workday", "url": "https://careers.microsoft.com"},
+  {"company": "Walmart", "tier": 1, "ats": "workday", "url": "https://careers.walmart.com"},
+  {"company": "IBM", "tier": 1, "ats": "workday", "url": "https://www.ibm.com/careers"},
+  {"company": "Cisco", "tier": 1, "ats": "workday", "url": "https://www.cisco.com/c/en/us/about/careers.html"},
+  {"company": "Oracle", "tier": 1, "ats": "oracle_cloud", "url": "https://www.oracle.com/careers/"},
+  {"company": "HPE", "tier": 1, "ats": "workday", "url": "https://careers.hpe.com/us/en/"},
+  {"company": "Meta", "tier": 1, "ats": "graphQL", "url": "https://www.metacareers.com/"},
+  {"company": "Google", "tier": 1, "ats": "google_custom", "url": "https://www.google.com/about/careers/applications/"},
+  {"company": "KPMG", "tier": 1, "ats": "avature", "url": "https://www.kpmguscareers.com/"},
+  {"company": "Sanofi", "tier": 1, "ats": "workday", "url": "https://jobs.sanofi.com/en"},
+  {"company": "State Street", "tier": 1, "ats": "workday", "url": "https://careers.statestreet.com/global/en"},
+  {"company": "Boston Consulting Group", "tier": 1, "ats": "greenhouse", "url": "https://careers.bcg.com/global/en"},
+  {"company": "Wayfair", "tier": 1, "ats": "lever", "url": "https://www.wayfair.com/careers/jobs"},
+  {"company": "Fidelity", "tier": 1, "ats": "avature", "url": "https://jobs.fidelity.com/en/"},
+  {"company": "Visa", "tier": 1, "ats": "workday", "url": "https://corporate.visa.com/en/careers.html"},
+  {"company": "CVS Health", "tier": 1, "ats": "custom", "url": "https://jobs.cvshealth.com/us/en"},
+  {"company": "JPMorgan Chase", "tier": 1, "ats": "workday", "url": "https://www.jpmorganchase.com/careers?redirect=careers_jpm"},
+  {"company": "Dell Technologies", "tier": 1, "ats": "workday", "url": "https://jobs.dell.com/en"},
+  {"company": "Intel", "tier": 1, "ats": "workday", "url": "https://intel.wd1.myworkdayjobs.com/External"},
+  {"company": "Salesforce", "tier": 1, "ats": "workday", "url": "https://www.salesforce.com/company/careers/"},
+  {"company": "Adobe", "tier": 1, "ats": "workday", "url": "https://www.adobe.com/careers.html"},
+  {"company": "PayPal", "tier": 1, "ats": "custom", "url": "https://careers.pypl.com/home/"}
+]
